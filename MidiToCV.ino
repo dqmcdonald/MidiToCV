@@ -13,45 +13,44 @@
 #include "noteList.h"
 
 
-
+// Software serial is used for the LCD display
 #define RX_PIN 2
 #define TX_PIN 3
 SoftwareSerial ss =  SoftwareSerial( RX_PIN, TX_PIN );
 
 #define GATE_PIN 5
+#define GATE_LED_PIN 16
+#define BUTTON1_PIN  18   // Button 1 is the "Mode" button
+#define BUTTON2_PIN  17   // Button 2 is the "Value" button
+// You may need to change these depending on how he board is wired up
+#define LDAC_PIN 8
+#define SHDN_PIN 9
+#define SS_PIN  10
 
-#define DEFAULT_LOWEST_NOTE  0x24
+#define MOD_WHEEL 0x01          // Mod wheel is control change #1
+#define GLIDE_CONTROLLER 0x52   // This is one of the rotary encoders on the keyboard
 
-#define NOTE_OFF   0x80 
-#define NOTE_ON    0x90
-#define PITCH_BEND 0xE0
-#define CONTROL_CHANGE  0xB0
-#define PROG_CHANGE 0xC0
-#define MOD_WHEEL 0x01
-#define GLIDE_CONTROLLER 0x52
-
-
+// Main modes - these control the display and function of the buttons
 #define MODE_OUTPUT      0
 #define MODE_CHANNEL     1
 #define MODE_GLIDE       2
 #define MODE_LOWEST_NOTE 3
 #define MODE_LEGATO      4
 
-#define MAX_MODE 4
+#define MAX_MODE 4  // The number of main modes
 
-
-#define MODE_AB 2      // Note to A + B
-#define MODE_APBE 0    // Note to A, Mod wheel to B
-#define MODE_APBV 1    // Note to A, Velocity to B
-#define MODE_TUNEA440 3
-#define MODE_TUNEA220 4
-#define MODE_TUNEA880 5
+// Output modes
+#define MODE_OUTPUT_AB          2    // Note to A + B
+#define MODE_OUTPUT_APBE        0    // Note to A, Mod wheel to B
+#define MODE_OUTPUT_APBV        1    // Note to A, Velocity to B
+#define MODE_OUTPUT_TUNEA440    3    // Set tuning to 440Hz
+#define MODE_OUTPUT_TUNEA220    4    // Set tuning to 220Hz
+#define MODE_OUTPUT_TUNEA880    5    // Set tuning to 880Hz
 
 #define MAX_OUTPUT_MODE 5  // The maximum number of modes
 
 
 #define PITCH_WHEEL_CENTERED MIDI_PITCHBEND_MAX/2
-
 #define MOD_WHEEL_MAX 0xFF
 
 //#define LCD_DEBUGGING 1
@@ -71,68 +70,33 @@ private:
 
 };
 
-
-
 SerialLCD lcd;
 
-const int LOWEST_NOTES[] = { 
-  12, 24, 36, 48, 60 };
+// Values available of the lowest notes:
+const int LOWEST_NOTES[] = {  12, 24, 36, 48, 60 };
 
 const float SEMITONE_INC = 1.0/12.0;  // semitone increment
 
-float note_voltage = 0.0;
+float note_voltage = 0.0;  // The voltage in place for the 
 
-// defines for MIDI Shield components only
-#define KNOB1  0
-#define KNOB2  1
-
-#define BUTTON1  17   // Button 1 is the "Mode" button
-#define BUTTON2  18   // Button 2 is the "Value" button
-#define GATE_LED_PIN 16
-
-#define STAT1  7
-#define STAT2  6
-
-#define OFF 1
-#define ON 2
-#define WAIT 3
-
+// Notes used for tuning:
 #define A440 69  // MIDI Note 69 is 440
 #define A220 57  // MIDI Note 57 is 220
 #define A880 81  // MIDI Note 81 is 880
 
-// You may need to change these depending on how he board is wired up
-#define LDAC_PIN 8
-#define SHDN_PIN 9
-#define SS_PIN  10
 
 int lowest_note_index = 1;
-int total_bytes =0; // The total number of MIDI bytes received
-int disp_line = 1;
-byte note;
-byte velocity;
-int pot;
-byte channel;
-byte stat;
 byte current_channel = 1;
-byte current_note = -1;
 char buff[21];
-int num_bytes_expected = 0;
-int cnt=0;
-int button1_press = 0;
-int button2_press = 0;
-int out_mode = 0;  // current output mode
-int pitch_bend_value = 0;
+int output_mode = 0;  // current output mode
 int glide_value = 0; // The current glide value, 0 turns it off. Otherwise it's the time in ms to glide the note
 bool doing_glide = false; // A flag to indicate we are gliding to a new value
 unsigned long glide_target; // The time in millis() we expect to have eached the note target:
 float glide_target_voltage = 0.0; // The voltage we want to reach
 float glide_start_voltage = 0.0;  // The voltage we started at
-static const unsigned int MAX_NUM_NOTES = 16; // Maximum number of MIDI notes
-MidiNoteList<MAX_NUM_NOTES> midi_notes;
-
+static const unsigned int MAX_NUM_NOTES = 16; // Maximum number of MIDI notes that can be active at one time
+MidiNoteList<MAX_NUM_NOTES> midi_notes;  // A list of Midi Notes
 int current_mode = MODE_OUTPUT;  // The current input and display mode
-
 bool legato_mode = false;
 
 
@@ -144,30 +108,18 @@ DAC dac( LDAC_PIN, SHDN_PIN, SS_PIN );
 
 
 void setup() {
-  pinMode(STAT1,OUTPUT);   
-  pinMode(STAT2,OUTPUT);
+ 
 
 
-
-  pinMode(BUTTON1,INPUT);
-  pinMode(BUTTON2,INPUT);
+  pinMode(BUTTON1_PIN,INPUT);
+  pinMode(BUTTON2_PIN,INPUT);
 
   pinMode(GATE_PIN, OUTPUT);
 
-  digitalWrite(BUTTON1,HIGH);
-  digitalWrite(BUTTON2,HIGH);
+  digitalWrite(BUTTON1_PIN,HIGH);
+  digitalWrite(BUTTON2_PIN,HIGH);
 
-  for(int i = 0;i < 10;i++) // flash MIDI Sheild LED's on startup
-  {
-    digitalWrite(STAT1,HIGH);  
-    digitalWrite(STAT2,LOW);
-    delay(30);
-    digitalWrite(STAT1,LOW);  
-    digitalWrite(STAT2,HIGH);
-    delay(30);
-  }
-  digitalWrite(STAT1,HIGH);   
-  digitalWrite(STAT2,HIGH);
+ 
 
 
   //start serial with midi baudrate 31250
@@ -209,14 +161,12 @@ void setup() {
 
 void loop() {
 
+  // If we are gliding then update the transition now:
   update_glide_voltage();
 
+  // Check for button presses:
   handle_button_one();
   handle_button_two();
-
-
-
-
 
   //*************** MIDI IN ***************//
   // Call MIDI.read the fastest you can for real-time performance.
@@ -224,10 +174,12 @@ void loop() {
 
 }
 
+// This function is called whenever a note on or note off happens. It looks at the list of notes and 
+// plays the last note received, or turns the gate off if there's none:
 void handle_notes_changed(bool is_first_note = false)
 {
   if (midi_notes.empty())
-  // No notes - turn the gate off:
+    // No notes - turn the gate off:
   {
     set_gate(false);
   }
@@ -266,7 +218,7 @@ void handle_note_on( byte channel, byte note, byte velocity)
   handle_notes_changed(first_note);
 }
 
-
+// Set the DAC voltage corresponding to the note
 void set_voltage( byte note, byte velocity ) {
 
 
@@ -291,13 +243,13 @@ void set_voltage( byte note, byte velocity ) {
     // Just set the note value:
 
     dac.setVoltage( note_voltage, CHANNEL_A );
-    if( out_mode == MODE_AB ) {
+    if( output_mode == MODE_OUTPUT_AB ) {
       dac.setVoltage( note_voltage, CHANNEL_B );
     }
   }
 
 
-  if( out_mode == MODE_APBV ) {  // Send velocity as voltage on Channel B
+  if( output_mode == MODE_OUTPUT_APBV ) {  // Send velocity as voltage on Channel B
 
     vel_voltage = float(velocity)/128.0 * 5.0;
     if( vel_voltage > 5.0 ) {
@@ -313,28 +265,30 @@ void set_voltage( byte note, byte velocity ) {
 
 // Handle a note-off event.
 void handle_note_off(byte channel, byte pitch, byte velocity ) {
-  
-    midi_notes.remove(pitch);
-    handle_notes_changed();
+
+  midi_notes.remove(pitch);
+  handle_notes_changed();
 }
 
+// Utility function that checks for button press:
 char button(char button_num)
 {
   return (!(digitalRead(button_num)));
 }
 
+// Handle the mode button:
 void handle_button_one ( void ) {
   // The mode button - simply update the main mode and redisplay in the LCD
   //
-  if( button( BUTTON1 ) ) {
+  if( button( BUTTON1_PIN ) ) {
     delay(100);
-    if( button( BUTTON1 ) ) {
+    if( button( BUTTON1_PIN ) ) {
       current_mode += 1;
       if( current_mode > MAX_MODE ) {
         current_mode = 0;
       }
       update_lcd();
-      while( button( BUTTON1 ) ) {
+      while( button( BUTTON1_PIN ) ) {
 
       }
 
@@ -343,35 +297,35 @@ void handle_button_one ( void ) {
 
 }
 
+// Handle the change value button:
 void handle_button_two ( void ) {
   // The value button - what we do here depends on the value of the main mode:
 
-
-
-  if( button( BUTTON2 ) ) {
+  if( button( BUTTON2_PIN ) ) {
     delay(100);
-    if( button( BUTTON2 ) ) {
+    if( button( BUTTON2_PIN ) ) {
 
 
       if( current_mode == MODE_OUTPUT) {
-        out_mode += 1;
-        if( out_mode > MAX_OUTPUT_MODE) {
-          out_mode = 0;
+        output_mode += 1;
+        if( output_mode > MAX_OUTPUT_MODE) {
+          output_mode = 0;
         }
 
 
-        if( out_mode == MODE_TUNEA440 ) {
+        if( output_mode == MODE_OUTPUT_TUNEA440 ) {
           handle_note_on( current_channel, A440, 128 );
         } 
-        else if( out_mode == MODE_TUNEA220 ) {
+        else if( output_mode == MODE_OUTPUT_TUNEA220 ) {
+          handle_note_off( current_channel, A440, 0 );
           handle_note_on( current_channel, A220, 128 );
         } 
-        else if( out_mode == MODE_TUNEA880 ) {
+        else if( output_mode == MODE_OUTPUT_TUNEA880 ) {
+          handle_note_off( current_channel, A220, 0 );
           handle_note_on( current_channel, A880, 128 );
         } 
         else {
-          handle_note_off( current_channel, A440, 0 );
-          current_note = -1;
+          handle_note_off( current_channel, A880, 0 );
         }
 
       }
@@ -404,39 +358,36 @@ void handle_button_two ( void ) {
       legato_mode = ! legato_mode;
     }
 
+    update_lcd();
+    while( button( BUTTON2_PIN ) ) {
+    }
 
 
   }
-
-
-  update_lcd();
-  while( button( BUTTON2 ) ) {
-  }
-
 }
 
+
+// Update the display - what is displayed depends on the main mode:
 void update_lcd( void ) {
-
-
   // In ouput mode
   if( current_mode == MODE_OUTPUT ) {
     lcd.displayLine( 1, "Output Mode:" );
-    if( out_mode == MODE_AB ) {
+    if( output_mode == MODE_OUTPUT_AB ) {
       lcd.displayLine( 2, "Pitch to A + B" );
     } 
-    else if (out_mode == MODE_APBE ) {
+    else if (output_mode == MODE_OUTPUT_APBE ) {
       lcd.displayLine( 2, "Pitch: A, Exp: B");
     } 
-    else if (out_mode == MODE_APBV ) {
+    else if (output_mode == MODE_OUTPUT_APBV ) {
       lcd.displayLine( 2, "Pitch: A, Vel: B");
     } 
-    else if (out_mode == MODE_TUNEA440 ) {
+    else if (output_mode == MODE_OUTPUT_TUNEA440 ) {
       lcd.displayLine( 2, "Tune 440Hz ");
     }
-    else if (out_mode == MODE_TUNEA220 ) {
+    else if (output_mode == MODE_OUTPUT_TUNEA220 ) {
       lcd.displayLine( 2, "Tune 220Hz ");
     }
-    else if (out_mode == MODE_TUNEA880 ) {
+    else if (output_mode == MODE_OUTPUT_TUNEA880 ) {
       lcd.displayLine( 2, "Tune 880Hz ");
     }
   }
@@ -485,9 +436,7 @@ inline void pulse_gate()
   set_gate(true);
 }
 
-
-
-
+// Calculate the pitch bend value. Max is +/- two full tones.
 void handle_pitch_bend( byte channel, int bend  ) {
   float voltage_offset = float(bend-PITCH_WHEEL_CENTERED) /MIDI_PITCHBEND_MAX * SEMITONE_INC * 4;
   float voltage = note_voltage + voltage_offset;
@@ -496,13 +445,13 @@ void handle_pitch_bend( byte channel, int bend  ) {
   if( voltage > 5.0 )
     voltage = 5.0;
   dac.setVoltage( voltage, CHANNEL_A );
-  if( out_mode == MODE_AB ) {
+  if( output_mode == MODE_OUTPUT_AB ) {
     dac.setVoltage( voltage, CHANNEL_B );
   }
-  // snprintf( buff, 16, "PB: %4d %f ",pitch_bend_value, voltage_offset );
-  // lcd.displayLine( 2, buff );
+  
 }
 
+// Control change is mod wheel and the rotary controller used for Glide:
 void handle_control_change( byte channel, byte number, byte value  ) {
 
   if( number == MOD_WHEEL ) {
@@ -513,12 +462,12 @@ void handle_control_change( byte channel, byte number, byte value  ) {
   }
 }
 
-
+// Calculate the mod wheel offset to the channel B voltage
 void handle_mod_wheel( byte value ) {
 
   float voltage = (float(value)/MOD_WHEEL_MAX)*10.0;
 
-  if( out_mode == MODE_APBE ) {
+  if( output_mode == MODE_OUTPUT_APBE ) {
     // snprintf( buff, 16, "MW: %d",int(voltage*100) );
     // lcd.displayLine( 2, buff );
     if( voltage < 0.0 )
@@ -538,6 +487,7 @@ void handle_glide_control( byte value ) {
   doing_glide= false; // turn off the current glide
 }
 
+// Apply the glide voltage - this is done linearly between the starting and target voltage:
 void update_glide_voltage( void ) {
 
   if( doing_glide == false )
@@ -555,10 +505,11 @@ void update_glide_voltage( void ) {
 
   note_voltage = glide_target_voltage - (glide_target_voltage-glide_start_voltage)*fraction;
   dac.setVoltage( note_voltage, CHANNEL_A );
-  if( out_mode == MODE_AB ) {
+  if( output_mode == MODE_OUTPUT_AB ) {
     dac.setVoltage( note_voltage, CHANNEL_B );
   }
 }
+
 
 
 
