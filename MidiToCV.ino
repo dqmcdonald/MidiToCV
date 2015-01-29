@@ -11,7 +11,7 @@
 #include <SoftwareSerial.h>
 #include <MIDI.h>
 #include "noteList.h"
-#include <avr/eeprom.h>
+
 
 // Software serial is used for the LCD display
 #define RX_PIN 2
@@ -73,8 +73,7 @@ private:
 SerialLCD lcd;
 
 // Values available of the lowest notes:
-const int LOWEST_NOTES[] = {  
-  12, 24, 36, 48, 60 };
+const int LOWEST_NOTES[] = {  12, 24, 36, 48, 60 };
 
 const float SEMITONE_INC = 1.0/12.0;  // semitone increment
 
@@ -86,27 +85,19 @@ float note_voltage = 0.0;  // The voltage in place for the
 #define A880 81  // MIDI Note 81 is 880
 
 
-
+int lowest_note_index = 1;
+byte current_channel = 1;
 char buff[21];
+int output_mode = 0;  // current output mode
+int glide_value = 0; // The current glide value, 0 turns it off. Otherwise it's the time in ms to glide the note
 bool doing_glide = false; // A flag to indicate we are gliding to a new value
 unsigned long glide_target; // The time in millis() we expect to have eached the note target:
 float glide_target_voltage = 0.0; // The voltage we want to reach
 float glide_start_voltage = 0.0;  // The voltage we started at
 static const unsigned int MAX_NUM_NOTES = 16; // Maximum number of MIDI notes that can be active at one time
 MidiNoteList<MAX_NUM_NOTES> midi_notes;  // A list of Midi Notes
-
-struct settings_t
-{
-  int current_mode;          // The current main mode
-  int output_mode;           // current output mode
-  byte current_channel;      // The midi channel
-  int glide_value;           // The current glide value
-  int lowest_note_index;     // The lowest note index
-  bool legato_mode;          // Legato mode
-  bool settings_saved;       // Whether these settings have ever been saved
-} 
-settings;
-
+int current_mode = MODE_OUTPUT;  // The current input and display mode
+bool legato_mode = false;
 
 
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial, MIDI);
@@ -117,8 +108,9 @@ DAC dac( LDAC_PIN, SHDN_PIN, SS_PIN );
 
 
 void setup() {
-
  
+
+
   pinMode(BUTTON1_PIN,INPUT);
   pinMode(BUTTON2_PIN,INPUT);
 
@@ -127,7 +119,7 @@ void setup() {
   digitalWrite(BUTTON1_PIN,HIGH);
   digitalWrite(BUTTON2_PIN,HIGH);
 
-
+ 
 
 
   //start serial with midi baudrate 31250
@@ -142,12 +134,9 @@ void setup() {
   lcd.backlight(20);
   digitalWrite( GATE_LED_PIN, HIGH );
   lcd.displayLine( 1, "MIDI2CV Conv.   ");
-  lcd.displayLine( 2, "Version 1.3     ");
+  lcd.displayLine( 2, "Version 1.1     ");
   delay( 5000 );
   digitalWrite( GATE_LED_PIN, LOW );
-
- initialze_settings();
-
   update_lcd();
 
   MIDI.setHandleNoteOn(handle_note_on);  
@@ -155,7 +144,7 @@ void setup() {
   MIDI.setHandlePitchBend(handle_pitch_bend);
   MIDI.setHandleControlChange(handle_control_change);
   // Initiate MIDI communications, listen to current channel
-  MIDI.begin(settings.current_channel);
+  MIDI.begin(current_channel);
 
 
 
@@ -211,7 +200,7 @@ void handle_notes_changed(bool is_first_note = false)
       }
       else
       {
-        if( !settings.legato_mode ) 
+        if( !legato_mode ) 
           pulse_gate(); // Re trigger envelopes. Remove for legato effect.
       }
     }
@@ -236,7 +225,7 @@ void set_voltage( byte note, byte velocity ) {
   float vel_voltage;
   glide_start_voltage = note_voltage;
 
-  note_voltage = (float)(note - (byte)LOWEST_NOTES[settings.lowest_note_index] ) 
+  note_voltage = (float)(note - (byte)LOWEST_NOTES[lowest_note_index] ) 
     * SEMITONE_INC;  
   if( note_voltage < 0.0 ) {
     note_voltage = 0.0; 
@@ -245,22 +234,22 @@ void set_voltage( byte note, byte velocity ) {
     note_voltage = 5.0; 
   }
 
-  if( settings.glide_value > 0 ) {
+  if( glide_value > 0 ) {
     doing_glide = true;
     glide_target_voltage = note_voltage;
-    glide_target = millis() + settings.glide_value;
+    glide_target = millis() + glide_value;
   } 
   else {
     // Just set the note value:
 
     dac.setVoltage( note_voltage, CHANNEL_A );
-    if( settings.output_mode == MODE_OUTPUT_AB ) {
+    if( output_mode == MODE_OUTPUT_AB ) {
       dac.setVoltage( note_voltage, CHANNEL_B );
     }
   }
 
 
-  if( settings.output_mode == MODE_OUTPUT_APBV ) {  // Send velocity as voltage on Channel B
+  if( output_mode == MODE_OUTPUT_APBV ) {  // Send velocity as voltage on Channel B
 
     vel_voltage = float(velocity)/128.0 * 5.0;
     if( vel_voltage > 5.0 ) {
@@ -294,12 +283,11 @@ void handle_button_one ( void ) {
   if( button( BUTTON1_PIN ) ) {
     delay(100);
     if( button( BUTTON1_PIN ) ) {
-      settings.current_mode += 1;
-      if( settings.current_mode > MAX_MODE ) {
-        settings.current_mode = 0;
+      current_mode += 1;
+      if( current_mode > MAX_MODE ) {
+        current_mode = 0;
       }
       update_lcd();
-      save_settings(); // Write current settings to EEPROM
       while( button( BUTTON1_PIN ) ) {
 
       }
@@ -318,60 +306,59 @@ void handle_button_two ( void ) {
     if( button( BUTTON2_PIN ) ) {
 
 
-      if( settings.current_mode == MODE_OUTPUT) {
-        settings.output_mode += 1;
-        if( settings.output_mode > MAX_OUTPUT_MODE) {
-          settings.output_mode = 0;
+      if( current_mode == MODE_OUTPUT) {
+        output_mode += 1;
+        if( output_mode > MAX_OUTPUT_MODE) {
+          output_mode = 0;
         }
 
 
-        if( settings.output_mode == MODE_OUTPUT_TUNEA440 ) {
-          handle_note_on( settings.current_channel, A440, 128 );
+        if( output_mode == MODE_OUTPUT_TUNEA440 ) {
+          handle_note_on( current_channel, A440, 128 );
         } 
-        else if( settings.output_mode == MODE_OUTPUT_TUNEA220 ) {
-          handle_note_off( settings.current_channel, A440, 0 );
-          handle_note_on( settings.current_channel, A220, 128 );
+        else if( output_mode == MODE_OUTPUT_TUNEA220 ) {
+          handle_note_off( current_channel, A440, 0 );
+          handle_note_on( current_channel, A220, 128 );
         } 
-        else if( settings.output_mode == MODE_OUTPUT_TUNEA880 ) {
-          handle_note_off( settings.current_channel, A220, 0 );
-          handle_note_on( settings.current_channel, A880, 128 );
+        else if( output_mode == MODE_OUTPUT_TUNEA880 ) {
+          handle_note_off( current_channel, A220, 0 );
+          handle_note_on( current_channel, A880, 128 );
         } 
         else {
-          handle_note_off( settings.current_channel, A880, 0 );
+          handle_note_off( current_channel, A880, 0 );
         }
 
       }
     }
 
-    if( settings.current_mode == MODE_CHANNEL ) {
-      settings.current_channel += 1;
-      if( settings.current_channel > 12 ) {
-        settings.current_channel = 0;
+    if( current_mode == MODE_CHANNEL ) {
+      current_channel += 1;
+      if( current_channel > 12 ) {
+        current_channel = 0;
       }
-      MIDI.setInputChannel( settings.current_channel );
+      MIDI.setInputChannel( current_channel );
 
     }
 
-    if( settings.current_mode == MODE_GLIDE) {
-      settings.glide_value += 5;
-      if( settings.glide_value > 127 ) {
-        settings.glide_value = 0;
+    if( current_mode == MODE_GLIDE) {
+      glide_value += 5;
+      if( glide_value > 127 ) {
+        glide_value = 0;
       }
     }
 
-    if( settings.current_mode == MODE_LOWEST_NOTE ) {
-      settings.lowest_note_index += 1;
-      if( settings.lowest_note_index > 4 ) {
-        settings.lowest_note_index = 0;
+    if( current_mode == MODE_LOWEST_NOTE ) {
+      lowest_note_index += 1;
+      if( lowest_note_index > 4 ) {
+        lowest_note_index = 0;
       }
     }
 
-    if( settings.current_mode == MODE_LEGATO ) {
-      settings.legato_mode = ! settings.legato_mode;
+    if( current_mode == MODE_LEGATO ) {
+      legato_mode = ! legato_mode;
     }
 
     update_lcd();
-    save_settings(); 
     while( button( BUTTON2_PIN ) ) {
     }
 
@@ -383,48 +370,48 @@ void handle_button_two ( void ) {
 // Update the display - what is displayed depends on the main mode:
 void update_lcd( void ) {
   // In ouput mode
-  if( settings.current_mode == MODE_OUTPUT ) {
+  if( current_mode == MODE_OUTPUT ) {
     lcd.displayLine( 1, "Output Mode:" );
-    if( settings.output_mode == MODE_OUTPUT_AB ) {
+    if( output_mode == MODE_OUTPUT_AB ) {
       lcd.displayLine( 2, "Pitch to A + B" );
     } 
-    else if (settings.output_mode == MODE_OUTPUT_APBE ) {
+    else if (output_mode == MODE_OUTPUT_APBE ) {
       lcd.displayLine( 2, "Pitch: A, Exp: B");
     } 
-    else if (settings.output_mode == MODE_OUTPUT_APBV ) {
+    else if (output_mode == MODE_OUTPUT_APBV ) {
       lcd.displayLine( 2, "Pitch: A, Vel: B");
     } 
-    else if (settings.output_mode == MODE_OUTPUT_TUNEA440 ) {
+    else if (output_mode == MODE_OUTPUT_TUNEA440 ) {
       lcd.displayLine( 2, "Tune 440Hz ");
     }
-    else if (settings.output_mode == MODE_OUTPUT_TUNEA220 ) {
+    else if (output_mode == MODE_OUTPUT_TUNEA220 ) {
       lcd.displayLine( 2, "Tune 220Hz ");
     }
-    else if (settings.output_mode == MODE_OUTPUT_TUNEA880 ) {
+    else if (output_mode == MODE_OUTPUT_TUNEA880 ) {
       lcd.displayLine( 2, "Tune 880Hz ");
     }
   }
 
-  if( settings.current_mode == MODE_CHANNEL ) {
-    snprintf(buff, 16, "Channel :%2d", int(settings.current_channel) );
+  if( current_mode == MODE_CHANNEL ) {
+    snprintf(buff, 16, "Channel :%2d", int(current_channel) );
     lcd.displayLine( 1, buff );
     lcd.displayLine( 2, "" );
   }
 
-  if( settings.current_mode == MODE_GLIDE ) {
-    snprintf(buff, 16, "Glide: %4d", int(settings.glide_value) );
+  if( current_mode == MODE_GLIDE ) {
+    snprintf(buff, 16, "Glide: %4d", int(glide_value) );
     lcd.displayLine( 1, buff );
     lcd.displayLine( 2, "" );
   }
 
-  if( settings.current_mode == MODE_LOWEST_NOTE ) {
-    snprintf(buff, 16, "Low Note: C%1d", int(settings.lowest_note_index) );
+  if( current_mode == MODE_LOWEST_NOTE ) {
+    snprintf(buff, 16, "Low Note: C%1d", int(lowest_note_index) );
     lcd.displayLine( 1, buff );
     lcd.displayLine( 2, "" );
   }
 
-  if( settings.current_mode == MODE_LEGATO ) {
-    if( settings.legato_mode )
+  if( current_mode == MODE_LEGATO ) {
+    if( legato_mode )
       snprintf(buff, 16, "Legato On");
     else
       snprintf(buff, 16, "Legato off");
@@ -458,10 +445,10 @@ void handle_pitch_bend( byte channel, int bend  ) {
   if( voltage > 5.0 )
     voltage = 5.0;
   dac.setVoltage( voltage, CHANNEL_A );
-  if( settings.output_mode == MODE_OUTPUT_AB ) {
+  if( output_mode == MODE_OUTPUT_AB ) {
     dac.setVoltage( voltage, CHANNEL_B );
   }
-
+  
 }
 
 // Control change is mod wheel and the rotary controller used for Glide:
@@ -480,7 +467,7 @@ void handle_mod_wheel( byte value ) {
 
   float voltage = (float(value)/MOD_WHEEL_MAX)*10.0;
 
-  if( settings.output_mode == MODE_OUTPUT_APBE ) {
+  if( output_mode == MODE_OUTPUT_APBE ) {
     // snprintf( buff, 16, "MW: %d",int(voltage*100) );
     // lcd.displayLine( 2, buff );
     if( voltage < 0.0 )
@@ -495,7 +482,7 @@ void handle_mod_wheel( byte value ) {
 
 void handle_glide_control( byte value ) {
   int glide = int((float(value)/127)*1000);
-  settings.glide_value = glide;
+  glide_value = glide;
   update_lcd();
   doing_glide= false; // turn off the current glide
 }
@@ -514,38 +501,13 @@ void update_glide_voltage( void ) {
   // We are still doing glide so calculate the current note voltage:
   unsigned long time_remaining = glide_target - millis();
 
-  float fraction = float(time_remaining)/float(settings.glide_value);
+  float fraction = float(time_remaining)/float(glide_value);
 
   note_voltage = glide_target_voltage - (glide_target_voltage-glide_start_voltage)*fraction;
   dac.setVoltage( note_voltage, CHANNEL_A );
-  if( settings.output_mode == MODE_OUTPUT_AB ) {
+  if( output_mode == MODE_OUTPUT_AB ) {
     dac.setVoltage( note_voltage, CHANNEL_B );
   }
-}
-
-void initialze_settings(){
-  // Read the settings from EEPROM:
-  eeprom_read_block((void*)&settings, (void*)0, sizeof(settings));
-
-  // If the Settings had not actually been saved then initialize them now and save them:
-  if( !settings.settings_saved ) {
-    settings.current_mode = MODE_OUTPUT;
-    settings.output_mode = MODE_OUTPUT_APBE;
-    settings.glide_value = 0;
-    settings.current_channel = 1;
-    settings.lowest_note_index = 1;
-    settings.legato_mode = false;
-    settings.settings_saved = true;
-    save_settings();
-  }
-
-}
-
-void save_settings() {
-  // Write settings to EEProm
-  settings.settings_saved = true;
-  eeprom_write_block((const void*)&settings, (void*)0, sizeof(settings));
-
 }
 
 
